@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MatchStatus {
+  DRAFT
+  ACTIVE
+  CLOSED
+  CANCELED
+}
+
+enum AttendanceStatus {
+  CONFIRMED
+  DROPPED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+}
+
+model Player {
+  id          String       @id @default(cuid())
+  name        String
+  phoneE164   String       @unique
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  attendance  Attendance[]
+  payments    Payment[]
+}
+
+model Match {
+  id          String       @id @default(cuid())
+  startsAt    DateTime
+  venue       String
+  totalCost   Int
+  slots       Int
+  status      MatchStatus  @default(DRAFT)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  attendance  Attendance[]
+  payments    Payment[]
+}
+
+model Attendance {
+  id         String           @id @default(cuid())
+  matchId    String
+  playerId   String
+  status     AttendanceStatus @default(CONFIRMED)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  match      Match            @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player     Player           @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, playerId])
+  @@index([matchId, status])
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  matchId     String
+  playerId    String
+  amountDue   Int           @default(0)
+  amountPaid  Int           @default(0)
+  status      PaymentStatus @default(PENDING)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  match       Match         @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player      Player        @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, playerId])
+  @@index([matchId, status])
+}
+
+model InboundMessage {
+  id         String   @id @default(cuid())
+  messageId  String   @unique
+  phone      String
+  body       String
+  command    String
+  createdAt  DateTime @default(now())
+
+  @@index([phone])
+}
