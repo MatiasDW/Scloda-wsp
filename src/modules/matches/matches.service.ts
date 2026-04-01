@@ -36,6 +36,13 @@ export class MatchesService {
     });
   }
 
+  async updateMatchVenue(matchId: string, venue: string) {
+    return prisma.match.update({
+      where: { id: matchId },
+      data: { venue }
+    });
+  }
+
   async getMatchState(matchId: string) {
     const [match, confirmedCount, paidPayments, pendingPayments] = await Promise.all([
       prisma.match.findUnique({ where: { id: matchId } }),

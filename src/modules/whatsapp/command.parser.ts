@@ -1,4 +1,4 @@
-export type CommandType = "JOIN" | "LEAVE" | "DEBT" | "PAID" | "STATUS" | "UNKNOWN";
+export type CommandType = "JOIN" | "LEAVE" | "DEBT" | "PAID" | "STATUS" | "SETUP_MATCH" | "UNKNOWN";
 
 export function parseCommand(body: string): CommandType {
   const normalized = body.trim().toLowerCase();
@@ -21,6 +21,10 @@ export function parseCommand(body: string): CommandType {
 
   if (["estado", "resumen"].includes(normalized)) {
     return "STATUS";
+  }
+
+  if (["configurar partido", "crear partido", "nuevo partido", "setup partido"].includes(normalized)) {
+    return "SETUP_MATCH";
   }
 
   return "UNKNOWN";

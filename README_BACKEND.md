@@ -30,6 +30,14 @@ Servicios:
 - `GET /admin/matches/:id/state` (header `x-admin-key`)
 - `POST /admin/matches/:id/remind` (header `x-admin-key`)
 
+## 4) Comandos WhatsApp (MVP)
+- `me sumo`
+- `me bajo`
+- `cuanto debo`
+- `ya pague`
+- `estado`
+- `configurar partido` (flujo guiado: cupos -> valor cancha -> hora citacion)
+
 Ejemplo crear partido:
 ```bash
 curl -X POST http://localhost:3000/admin/matches \\
@@ -60,7 +68,7 @@ curl -X POST http://localhost:3000/webhooks/kapso/messages \\
   }'
 ```
 
-## 4) Nota Kapso
+## 5) Nota Kapso
 Para desarrollo local, `WHATSAPP_MOCK_MODE=true` y las respuestas se registran en logs.
 Para produccion, setear:
 - `WHATSAPP_MOCK_MODE=false`
