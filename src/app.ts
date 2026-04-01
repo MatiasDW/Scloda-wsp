@@ -15,6 +15,17 @@ export function buildApp() {
     logger: { level: env.LOG_LEVEL }
   });
 
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (request, body, done) => {
+    try {
+      const rawBody = typeof body === "string" ? body : body.toString("utf8");
+      (request as any).rawBody = rawBody;
+      done(null, rawBody.length > 0 ? JSON.parse(rawBody) : {});
+    } catch (error) {
+      done(error as Error, undefined);
+    }
+  });
+
   const kapsoClient = new KapsoClient();
   const playersService = new PlayersService();
   const attendanceService = new AttendanceService();

@@ -1,4 +1,13 @@
-export type CommandType = "JOIN" | "LEAVE" | "DEBT" | "PAID" | "STATUS" | "SETUP_MATCH" | "UNKNOWN";
+export type CommandType =
+  | "JOIN"
+  | "LEAVE"
+  | "DEBT"
+  | "PAID"
+  | "STATUS"
+  | "SETUP_MATCH"
+  | "UPDATE_ADDRESS"
+  | "CONFIG_STATUS"
+  | "UNKNOWN";
 
 export function parseCommand(body: string): CommandType {
   const normalized = body.trim().toLowerCase();
@@ -25,6 +34,18 @@ export function parseCommand(body: string): CommandType {
 
   if (["configurar partido", "crear partido", "nuevo partido", "setup partido"].includes(normalized)) {
     return "SETUP_MATCH";
+  }
+
+  if (["configuracion actual", "configuración actual", "config actual", "partido actual"].includes(normalized)) {
+    return "CONFIG_STATUS";
+  }
+
+  if (
+    /^(actualizar\s+direccion|actualizar\s+dirección|cambiar\s+direccion|cambiar\s+dirección|direccion\s+|dirección\s+)/.test(
+      normalized
+    )
+  ) {
+    return "UPDATE_ADDRESS";
   }
 
   return "UNKNOWN";

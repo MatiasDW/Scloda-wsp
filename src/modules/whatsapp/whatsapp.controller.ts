@@ -1,5 +1,7 @@
 import { FastifyReply, FastifyRequest } from "fastify";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import { env } from "../../config/env.js";
 import { logger } from "../../shared/logger.js";
 import { WhatsAppService } from "./whatsapp.service.js";
 
@@ -54,7 +56,41 @@ function extractMessage(payload: unknown): ExtractedMessage | null {
 export class WhatsAppController {
   constructor(private readonly whatsappService: WhatsAppService) {}
 
+  private isValidSignature(request: FastifyRequest): boolean {
+    const rawHeader = request.headers["x-webhook-signature"];
+    const signature = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+
+    if (!signature) {
+      if (env.NODE_ENV === "production") {
+        return false;
+      }
+
+      logger.warn("Webhook signature missing in non-production request");
+      return true;
+    }
+
+    const rawBody = String((request as any).rawBody ?? JSON.stringify(request.body ?? {}));
+    const digest = createHmac("sha256", env.WEBHOOK_SECRET).update(rawBody).digest("hex");
+
+    const candidates = [digest, `sha256=${digest}`, env.WEBHOOK_SECRET];
+    return candidates.some((candidate) => {
+      const left = Buffer.from(signature);
+      const right = Buffer.from(candidate);
+      if (left.length !== right.length) {
+        return false;
+      }
+
+      return timingSafeEqual(left, right);
+    });
+  }
+
   handleWebhook = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    if (!this.isValidSignature(request)) {
+      logger.warn({ headers: request.headers }, "Webhook rejected: invalid signature");
+      reply.code(401).send({ ok: false, message: "invalid_signature" });
+      return;
+    }
+
     const message = extractMessage(request.body);
 
     if (!message) {

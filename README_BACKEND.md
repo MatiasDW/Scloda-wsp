@@ -36,7 +36,9 @@ Servicios:
 - `cuanto debo`
 - `ya pague`
 - `estado`
-- `configurar partido` (flujo guiado: cupos -> valor cancha -> hora citacion)
+- `configurar partido` (flujo guiado: cupos -> valor cancha -> hora citacion -> direccion)
+- `actualizar direccion <direccion>`
+- `configuracion actual`
 
 Ejemplo crear partido:
 ```bash
@@ -56,6 +58,7 @@ Ejemplo webhook entrante:
 ```bash
 curl -X POST http://localhost:3000/webhooks/kapso/messages \\
   -H 'Content-Type: application/json' \\
+  -H 'X-Webhook-Signature: <firma_o_secret>' \\
   -d '{
     \"event\": \"message.received\",
     \"data\": {
@@ -74,3 +77,4 @@ Para produccion, setear:
 - `WHATSAPP_MOCK_MODE=false`
 - `KAPSO_API_KEY`
 - `KAPSO_SEND_MESSAGE_URL`
+- `WEBHOOK_SECRET` (mismo secret configurado en Kapso Webhooks)

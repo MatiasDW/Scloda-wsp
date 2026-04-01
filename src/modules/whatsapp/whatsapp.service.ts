@@ -139,30 +139,76 @@ function sanitizeVenue(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function titleCaseWords(value: string): string {
+  return value
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => {
+      if (/^\d+$/.test(part)) {
+        return part;
+      }
+
+      const lower = part.toLowerCase();
+      return lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join(" ");
+}
+
+function normalizeVenueText(value: string): string {
+  let cleaned = sanitizeVenue(value)
+    .replace(/^[\s,.:;-]+|[\s,.:;-]+$/g, "")
+    .replace(/^(es|en)\s+/i, "")
+    .replace(/^(queda\s+en|esta\s+en|está\s+en)\s+/i, "");
+
+  cleaned = sanitizeVenue(cleaned);
+  return titleCaseWords(cleaned);
+}
+
 function parseVenueFromText(input: string): string | null {
   const compact = sanitizeVenue(input);
   if (compact.length < 4) {
     return null;
   }
 
-  const explicit = compact.match(
-    /(?:direccion|dirección|ubicacion|ubicación|lugar)\s*[:\-]?\s*(.+)$/i
+  const highPriority = compact.match(
+    /(?:direccion|dirección|ubicacion|ubicación|lugar)\s*[:\-]?\s*([^,.;\n]+)$/i
   );
-  if (explicit?.[1]) {
-    const candidate = sanitizeVenue(explicit[1]);
-    if (
-      candidate.length >= 4 &&
-      !/(?:lucas|luca|\$\s*\d+|\bcitacion\b|\bcitación\b)/i.test(candidate)
-    ) {
+  if (highPriority?.[1]) {
+    const candidate = normalizeVenueText(highPriority[1]);
+    if (candidate.length >= 4) {
       return candidate.slice(0, 80);
     }
   }
 
-  if (/[a-zA-Z]/.test(compact) && !/(?:lucas|luca|\$\s*\d+|\b\d{4,}\b)/i.test(compact)) {
-    return compact.slice(0, 80);
+  const canchaCandidate = compact.match(/(?:cancha)\s*[:\-]?\s*([^,.;\n]+)$/i);
+  if (canchaCandidate?.[1]) {
+    const candidate = normalizeVenueText(canchaCandidate[1]);
+    if (candidate.length >= 4 && !/(?:lucas|luca|\$\s*\d+)/i.test(candidate)) {
+      return candidate.slice(0, 80);
+    }
+  }
+
+  const normalizedCompact = normalizeVenueText(compact);
+  const hasLetters = /[a-zA-Z]/.test(normalizedCompact);
+  const hasDigits = /\d/.test(normalizedCompact);
+  const hasTwoWords = normalizedCompact.split(" ").length >= 2;
+  const looksLikeMoney = /(?:lucas|luca|\$\s*\d+|\b\d{4,}\b)/i.test(normalizedCompact);
+  if (hasLetters && (hasDigits || hasTwoWords) && !looksLikeMoney) {
+    return normalizedCompact.slice(0, 80);
   }
 
   return null;
+}
+
+function extractUpdateAddressCommandValue(input: string): string | null {
+  const explicit = input.match(
+    /^(?:actualizar\s+direccion|actualizar\s+dirección|cambiar\s+direccion|cambiar\s+dirección|direccion|dirección)\s*[:\-]?\s*(.+)$/i
+  );
+  if (explicit?.[1]) {
+    return parseVenueFromText(`direccion ${explicit[1]}`) ?? normalizeVenueText(explicit[1]);
+  }
+
+  return parseVenueFromText(input);
 }
 
 function buildNextStartsAt(hour: number, minute: number): Date {
@@ -199,6 +245,33 @@ function buildSlotsList(slots: number, confirmedNames: string[]): string {
   return lines.join("\n");
 }
 
+function buildPlayerDisplayName(name: string, phoneE164: string): string {
+  const cleaned = sanitizeVenue(name);
+  if (!cleaned || cleaned.toLowerCase() === "jugador") {
+    return phoneE164;
+  }
+
+  return titleCaseWords(cleaned);
+}
+
+function buildHelpMessage(): string {
+  return [
+    "Comandos:",
+    "- configurar partido",
+    "- actualizar direccion <direccion>",
+    "- configuracion actual",
+    "- me sumo",
+    "- me bajo",
+    "- cuanto debo",
+    "- ya pague",
+    "- estado"
+  ].join("\n");
+}
+
+function buildNoRecognizedMessage(): string {
+  return `${buildSclodaIntro()}\n\nNo entendi ese mensaje.`;
+}
+
 function isGreetingOrHelp(normalizedBody: string): boolean {
   return ["hola", "buenas", "inicio", "menu", "menú", "ayuda", "help", "scloda"].includes(normalizedBody);
 }
@@ -208,13 +281,7 @@ function buildSclodaIntro(): string {
     "Hola, soy Scloda 👋",
     "Te ayudo a organizar pichangas y ordenar las cuentas por WhatsApp.",
     "",
-    "Comandos:",
-    "- configurar partido",
-    "- me sumo",
-    "- me bajo",
-    "- cuanto debo",
-    "- ya pague",
-    "- estado"
+    buildHelpMessage()
   ].join("\n");
 }
 
@@ -276,41 +343,38 @@ export class WhatsAppService {
         return;
       }
 
+      if (command === "UPDATE_ADDRESS") {
+        await this.handleSetupSession(player.phoneE164, existingSession, message.body);
+        return;
+      }
+
       await this.handleSetupSession(player.phoneE164, existingSession, message.body);
       return;
     }
 
-    if (command === "UNKNOWN") {
-      const inferredVenue = parseVenueFromText(message.body);
-      if (inferredVenue) {
-        const activeMatch = await this.matchesService.getActiveMatch();
-        if (activeMatch) {
-          await this.matchesService.updateMatchVenue(activeMatch.id, inferredVenue);
-          const state = await this.matchesService.getMatchState(activeMatch.id);
-          const confirmedPlayers = await this.attendanceService.listConfirmedPlayers(activeMatch.id);
-          const updatedMatch = await this.matchesService.getActiveMatch();
-
-          if (state && updatedMatch) {
-            const { date, time } = formatStartsAt(updatedMatch.startsAt);
-            const slotsList = buildSlotsList(updatedMatch.slots, confirmedPlayers.map((row) => row.name));
-
-            await this.kapsoClient.sendText(
-              player.phoneE164,
-              [
-                "Direccion actualizada.",
-                `- Fecha: ${date}`,
-                `- Hora citacion: ${time}`,
-                `- Direccion: ${updatedMatch.venue}`,
-                `- Cupos: ${state.confirmedCount}/${state.slots} confirmados`,
-                "",
-                "Lista de jugadores:",
-                slotsList
-              ].join("\n")
-            );
-            return;
-          }
-        }
+    if (command === "UPDATE_ADDRESS") {
+      const updated = await this.updateActiveMatchVenue(message.body);
+      if (updated) {
+        await this.kapsoClient.sendText(player.phoneE164, updated);
+        return;
       }
+
+      await this.kapsoClient.sendText(
+        player.phoneE164,
+        "No pude actualizar direccion. Usa: actualizar direccion Escandinavia 350"
+      );
+      return;
+    }
+
+    if (command === "CONFIG_STATUS") {
+      const snapshot = await this.buildActiveMatchSnapshot();
+      if (!snapshot) {
+        await this.kapsoClient.sendText(player.phoneE164, "No hay pichanga activa por ahora.");
+        return;
+      }
+
+      await this.kapsoClient.sendText(player.phoneE164, snapshot);
+      return;
     }
 
     if (command === "UNKNOWN" && looksLikeSetupIntent(message.body)) {
@@ -334,10 +398,7 @@ export class WhatsAppService {
     }
 
     if (command === "UNKNOWN") {
-      await this.kapsoClient.sendText(
-        player.phoneE164,
-        `${buildSclodaIntro()}\n\nNo entendi ese mensaje.`
-      );
+      await this.kapsoClient.sendText(player.phoneE164, buildNoRecognizedMessage());
       return;
     }
 
@@ -392,32 +453,61 @@ export class WhatsAppService {
     }
 
     if (command === "STATUS") {
-      const state = await this.matchesService.getMatchState(activeMatch.id);
-
-      if (!state) {
+      const snapshot = await this.buildActiveMatchSnapshot();
+      if (!snapshot) {
         await this.kapsoClient.sendText(player.phoneE164, "No pude obtener el estado actual.");
         return;
       }
 
-      const confirmedPlayers = await this.attendanceService.listConfirmedPlayers(activeMatch.id);
-      const { date, time } = formatStartsAt(activeMatch.startsAt);
-      const slotsList = buildSlotsList(activeMatch.slots, confirmedPlayers.map((row) => row.name));
-
-      await this.kapsoClient.sendText(
-        player.phoneE164,
-        [
-          "Resumen Scloda",
-          `- Fecha: ${date}`,
-          `- Hora citacion: ${time}`,
-          `- Direccion: ${activeMatch.venue}`,
-          `- Cupos: ${state.confirmedCount}/${state.slots} confirmados`,
-          `- Caja: $${formatCurrency(state.collected)} recaudado | $${formatCurrency(state.pending)} pendiente`,
-          "",
-          "Lista de jugadores:",
-          slotsList
-        ].join("\n")
-      );
+      await this.kapsoClient.sendText(player.phoneE164, snapshot);
     }
+  }
+
+  private async updateActiveMatchVenue(messageBody: string): Promise<string | null> {
+    const venue =
+      extractUpdateAddressCommandValue(messageBody) ??
+      parseVenueFromText(messageBody);
+    if (!venue) {
+      return null;
+    }
+
+    const activeMatch = await this.matchesService.getActiveMatch();
+    if (!activeMatch) {
+      return null;
+    }
+
+    await this.matchesService.updateMatchVenue(activeMatch.id, venue);
+    const snapshot = await this.buildActiveMatchSnapshot("Direccion actualizada.");
+    return snapshot;
+  }
+
+  private async buildActiveMatchSnapshot(title = "Resumen Scloda"): Promise<string | null> {
+    const activeMatch = await this.matchesService.getActiveMatch();
+    if (!activeMatch) {
+      return null;
+    }
+
+    const state = await this.matchesService.getMatchState(activeMatch.id);
+    if (!state) {
+      return null;
+    }
+
+    const confirmedPlayers = await this.attendanceService.listConfirmedPlayers(activeMatch.id);
+    const confirmedDisplayNames = confirmedPlayers.map((row) => buildPlayerDisplayName(row.name, row.phoneE164));
+    const { date, time } = formatStartsAt(activeMatch.startsAt);
+    const slotsList = buildSlotsList(activeMatch.slots, confirmedDisplayNames);
+
+    return [
+      title,
+      `- Fecha: ${date}`,
+      `- Hora citacion: ${time}`,
+      `- Direccion: ${activeMatch.venue}`,
+      `- Cupos: ${state.confirmedCount}/${state.slots} confirmados`,
+      `- Caja: $${formatCurrency(state.collected)} recaudado | $${formatCurrency(state.pending)} pendiente`,
+      "",
+      "Lista de jugadores:",
+      slotsList
+    ].join("\n");
   }
 
   private async handleSetupSession(phoneE164: string, session: MatchSetupSession, messageBody: string): Promise<void> {
