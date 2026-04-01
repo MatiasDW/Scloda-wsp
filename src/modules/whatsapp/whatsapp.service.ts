@@ -1,7 +1,13 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "../../generated/prisma/index.js";
 import { prisma } from "../../shared/db/prisma.js";
 import { AttendanceService } from "../attendance/attendance.service.js";
 import { MatchesService } from "../matches/matches.service.js";
+import {
+  AddConsumptionInput,
+  ConsumptionTarget,
+  RestaurantExpensesService,
+  RestaurantSummary
+} from "../restaurant/restaurant-expenses.service.js";
 import { PaymentsService } from "../payments/payments.service.js";
 import { PlayersService } from "../players/players.service.js";
 import { parseCommand } from "./command.parser.js";
@@ -14,16 +20,393 @@ export interface IncomingMessage {
   profileName?: string;
 }
 
+type MatchSetupStep = "AWAITING_SLOTS" | "AWAITING_TOTAL_COST" | "AWAITING_CITATION_TIME" | "AWAITING_VENUE";
+
+type MatchSetupSession = {
+  step: MatchSetupStep;
+  slots?: number;
+  totalCost?: number;
+  citationHour?: number;
+  citationMinute?: number;
+  venue?: string;
+};
+
+function stripAccents(input: string): string {
+  return input.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function parseSlotsFromText(input: string): number | null {
+  const normalized = stripAccents(input.toLowerCase());
+  const labeledMatch = normalized.match(/(\d{1,2})\s*(jugadores?|personas?|cupos?)/);
+  if (labeledMatch?.[1]) {
+    const slots = Number.parseInt(labeledMatch[1], 10);
+    return slots >= 6 && slots <= 40 ? slots : null;
+  }
+
+  const numericMatches = [...normalized.matchAll(/\d{1,2}/g)];
+  for (const candidate of numericMatches) {
+    const value = Number.parseInt(candidate[0], 10);
+    if (value >= 6 && value <= 40) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function parseCostFromText(input: string): number | null {
+  const normalized = stripAccents(input.toLowerCase());
+
+  const lucasMatch = normalized.match(/(\d+(?:[.,]\d+)?)\s*(lucas|luca|k)\b/);
+  if (lucasMatch?.[1]) {
+    const base = Number.parseFloat(lucasMatch[1].replace(",", "."));
+    if (Number.isFinite(base) && base > 0) {
+      return Math.round(base * 1000);
+    }
+  }
+
+  const groupedAmountMatch = normalized.match(/(\$?\s*\d{1,3}(?:[.\s]\d{3})+)/);
+  if (groupedAmountMatch?.[1]) {
+    const digits = groupedAmountMatch[1].replace(/[^\d]/g, "");
+    const amount = Number.parseInt(digits, 10);
+    if (Number.isFinite(amount) && amount >= 1000) {
+      return amount;
+    }
+  }
+
+  const plainAmountMatches = [...normalized.matchAll(/\b\d{4,8}\b/g)];
+  for (const candidate of plainAmountMatches) {
+    const amount = Number.parseInt(candidate[0], 10);
+    if (amount >= 1000) {
+      return amount;
+    }
+  }
+
+  return null;
+}
+
+function parseTimeExpression(input: string): { hour: number; minute: number } | null {
+  const normalized = stripAccents(input.trim().toLowerCase());
+
+  const ampm = normalized.match(/(?:a\s*las\s*)?(\d{1,2})(?::([0-5]\d))?\s*(am|pm)\b/);
+  if (ampm?.[1]) {
+    const rawHour = Number.parseInt(ampm[1], 10);
+    const minute = ampm[2] ? Number.parseInt(ampm[2], 10) : 0;
+    if (rawHour < 1 || rawHour > 12) {
+      return null;
+    }
+
+    const meridiem = ampm[3];
+    let hour = rawHour % 12;
+    if (meridiem === "pm") {
+      hour += 12;
+    }
+    return { hour, minute };
+  }
+
+  const hhmm = normalized.match(/\b([01]?\d|2[0-3])[:h]([0-5]\d)\b/);
+  if (hhmm?.[1] && hhmm[2]) {
+    return {
+      hour: Number.parseInt(hhmm[1], 10),
+      minute: Number.parseInt(hhmm[2], 10)
+    };
+  }
+
+  const hourOnly = normalized.match(/\b([01]?\d|2[0-3])\s*(hrs?|horas?)?\b/);
+  if (!hourOnly?.[1]) {
+    return null;
+  }
+
+  return {
+    hour: Number.parseInt(hourOnly[1], 10),
+    minute: 0
+  };
+}
+
+function parseCitationTime(input: string): { hour: number; minute: number } | null {
+  const normalized = stripAccents(input.trim().toLowerCase());
+  const keywordSegment = normalized.match(/(?:citacion|cita|hora)\s*(?:de|a\s*las|:)?\s*([^,.;\n]+)/);
+  if (keywordSegment?.[1]) {
+    return parseTimeExpression(keywordSegment[1]);
+  }
+
+  const isStandalone =
+    /^(\d{1,2}(:\d{2})?\s*(am|pm|hrs?|horas?)?|\s*a\s*las\s*\d{1,2}(:\d{2})?\s*(am|pm|hrs?|horas?)?)$/i.test(
+      normalized
+    );
+  if (!isStandalone) {
+    return null;
+  }
+
+  return parseTimeExpression(normalized);
+}
+
+function sanitizeVenue(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function parseVenueFromText(input: string): string | null {
+  const compact = sanitizeVenue(input);
+  if (compact.length < 4) {
+    return null;
+  }
+
+  const explicit = compact.match(/(?:direccion|dirección|ubicacion|ubicación|lugar)\s*[:\-]?\s*(.+)$/i);
+  if (explicit?.[1]) {
+    const candidate = sanitizeVenue(explicit[1]);
+    if (candidate.length >= 4 && !/(?:lucas|luca|\$\s*\d+|\bcitacion\b|\bcitación\b)/i.test(candidate)) {
+      return candidate.slice(0, 80);
+    }
+  }
+
+  if (/[a-zA-Z]/.test(compact) && !/(?:lucas|luca|\$\s*\d+|\b\d{4,}\b)/i.test(compact)) {
+    return compact.slice(0, 80);
+  }
+
+  return null;
+}
+
+function buildNextStartsAt(hour: number, minute: number): Date {
+  const now = new Date();
+  const startsAt = new Date(now);
+  startsAt.setHours(hour, minute, 0, 0);
+
+  if (startsAt.getTime() <= now.getTime()) {
+    startsAt.setDate(startsAt.getDate() + 1);
+  }
+
+  return startsAt;
+}
+
+function formatCurrency(amount: number): string {
+  return new Intl.NumberFormat("es-CL").format(amount);
+}
+
+function formatStartsAt(startsAt: Date): { date: string; time: string } {
+  return {
+    date: startsAt.toLocaleDateString("es-CL", { day: "2-digit", month: "2-digit" }),
+    time: startsAt.toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit", hour12: false })
+  };
+}
+
+function buildSlotsList(slots: number, confirmedNames: string[]): string {
+  const lines: string[] = [];
+  for (let idx = 0; idx < slots; idx += 1) {
+    const slotNumber = idx + 1;
+    const name = confirmedNames[idx];
+    lines.push(`${slotNumber}. ${name ? name : "[pendiente]"}`);
+  }
+
+  return lines.join("\n");
+}
+
+function isGreetingOrHelp(normalizedBody: string): boolean {
+  return ["hola", "buenas", "inicio", "menu", "menú", "ayuda", "help", "scloda"].includes(normalizedBody);
+}
+
+function buildSclodaIntro(): string {
+  return [
+    "Hola, soy Scloda 👋",
+    "Te ayudo a organizar pichangas y ordenar las cuentas por WhatsApp.",
+    "",
+    "Pichanga:",
+    "- configurar partido",
+    "- me sumo",
+    "- me bajo",
+    "- cuanto debo",
+    "- ya pague",
+    "- estado",
+    "",
+    "Salidas / restaurant:",
+    "- salida crear [nombre opcional]",
+    "- salida me sumo",
+    "- salida consumo <detalle> <monto> [/yo|/todos|#1,#2]",
+    "- salida estado",
+    "- salida cerrar"
+  ].join("\n");
+}
+
+function buildRestaurantHelp(): string {
+  return [
+    "Cuenta de salida (restaurant):",
+    "1) salida crear Cena post pichanga",
+    "2) salida me sumo",
+    "3) salida consumo 2 piscolas 12000 /yo",
+    "4) salida consumo papas para la mesa 18000 /todos",
+    "5) salida consumo pizza 22000 #1,#3",
+    "6) salida estado",
+    "7) salida cerrar",
+    "",
+    "Selector de consumo:",
+    "- /yo: solo quien envia",
+    "- /todos: se reparte entre todos",
+    "- #1,#3: indices del resumen"
+  ].join("\n");
+}
+
+function looksLikeSetupIntent(rawBody: string): boolean {
+  const normalized = stripAccents(rawBody.toLowerCase());
+  const hasKeyword =
+    /(partido|pichanga|cancha|citacion|cita|jugadores|cupos|direccion|ubicacion|lugar)/.test(normalized);
+  if (!hasKeyword) {
+    return false;
+  }
+
+  return (
+    parseSlotsFromText(rawBody) !== null ||
+    parseCostFromText(rawBody) !== null ||
+    parseCitationTime(rawBody) !== null ||
+    parseVenueFromText(rawBody) !== null
+  );
+}
+
+function extractRestaurantCreatePayload(rawBody: string): {
+  title: string;
+  tipPercent?: number;
+  serviceCharge?: number;
+} {
+  const compact = rawBody.trim();
+  const removedPrefix = compact.replace(/^salida\s+crear\s*/i, "").replace(/^crear\s+salida\s*/i, "").trim();
+
+  let title = removedPrefix.length > 0 ? removedPrefix : "Salida post pichanga";
+
+  let tipPercent: number | undefined;
+  const tipMatch = title.match(/(?:propina|tip)\s*(\d{1,2})\s*%?/i);
+  if (tipMatch?.[1]) {
+    tipPercent = Math.min(100, Math.max(0, Number.parseInt(tipMatch[1], 10)));
+    title = title.replace(tipMatch[0], " ").trim();
+  }
+
+  let serviceCharge: number | undefined;
+  const serviceMatch = title.match(/(?:servicio|cargo)\s*\$?\s*(\d{1,3}(?:[.\s]\d{3})+|\d{3,8})/i);
+  if (serviceMatch?.[1]) {
+    const parsed = Number.parseInt(serviceMatch[1].replace(/[^\d]/g, ""), 10);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      serviceCharge = parsed;
+    }
+    title = title.replace(serviceMatch[0], " ").trim();
+  }
+
+  title = title.replace(/\s+/g, " ").trim();
+  if (title.length === 0) {
+    title = "Salida post pichanga";
+  }
+
+  return {
+    title: title.slice(0, 80),
+    tipPercent,
+    serviceCharge
+  };
+}
+
+function parseSelector(raw: string): { cleaned: string; target: ConsumptionTarget } {
+  const compact = raw.trim();
+
+  const allMatch = compact.match(/\s+\/(?:todos|all)\s*$/i);
+  if (allMatch) {
+    return {
+      cleaned: compact.slice(0, allMatch.index).trim(),
+      target: { kind: "ALL" }
+    };
+  }
+
+  const selfMatch = compact.match(/\s+\/(?:yo|self)\s*$/i);
+  if (selfMatch) {
+    return {
+      cleaned: compact.slice(0, selfMatch.index).trim(),
+      target: { kind: "SELF" }
+    };
+  }
+
+  const indexesMatch = compact.match(/\s+#(\d+(?:\s*,\s*\d+)*)\s*$/i);
+  if (indexesMatch?.[1]) {
+    const indexes = indexesMatch[1]
+      .split(",")
+      .map((value) => Number.parseInt(value.trim(), 10))
+      .filter((value) => Number.isFinite(value) && value > 0);
+
+    if (indexes.length > 0) {
+      return {
+        cleaned: compact.slice(0, indexesMatch.index).trim(),
+        target: { kind: "INDEXES", indexes }
+      };
+    }
+  }
+
+  return { cleaned: compact, target: { kind: "SELF" } };
+}
+
+function parseRestaurantConsumption(rawBody: string): AddConsumptionInput | null {
+  const withoutPrefix = rawBody.trim().replace(/^salida\s+consumo\s+/i, "").replace(/^consumo\s+/i, "").trim();
+  if (withoutPrefix.length === 0) {
+    return null;
+  }
+
+  const { cleaned, target } = parseSelector(withoutPrefix);
+  const totalAmount = parseCostFromText(cleaned);
+  if (!totalAmount) {
+    return null;
+  }
+
+  let description = cleaned
+    .replace(/\$?\s*\d{1,3}(?:[.\s]\d{3})+\s*$/g, "")
+    .replace(/\$?\s*\d{4,8}\s*$/g, "")
+    .replace(/\d+(?:[.,]\d+)?\s*(lucas|luca|k)\s*$/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (description.length === 0) {
+    description = "Consumo";
+  }
+
+  return {
+    description: description.slice(0, 120),
+    quantity: 1,
+    totalAmount,
+    target
+  };
+}
+
+function buildRestaurantSummaryMessage(summary: RestaurantSummary, isClosed = false): string {
+  const header = isClosed ? "Cuenta cerrada" : "Resumen salida";
+
+  const lines = [
+    `${header}: ${summary.title}`,
+    summary.venue ? `- Lugar: ${summary.venue}` : "",
+    `- Items: ${summary.itemsCount}`,
+    `- Subtotal consumos: $${formatCurrency(summary.subtotal)}`,
+    `- Propina (${summary.tipPercent}%): $${formatCurrency(summary.tipAmount)}`,
+    `- Servicio: $${formatCurrency(summary.serviceCharge)}`,
+    `- Total cuenta: $${formatCurrency(summary.total)}`,
+    "",
+    "Detalle por persona:"
+  ].filter((line) => line.length > 0);
+
+  for (const participant of summary.participants) {
+    lines.push(
+      `${participant.index}. ${participant.name}: $${formatCurrency(participant.amountDue)} (consumo $${formatCurrency(
+        participant.itemSubtotal
+      )} + extras $${formatCurrency(participant.extras)})`
+    );
+  }
+
+  return lines.join("\n");
+}
+
 export class WhatsAppService {
+  private readonly setupSessions = new Map<string, MatchSetupSession>();
+
   constructor(
     private readonly kapsoClient: KapsoClient,
     private readonly playersService: PlayersService,
     private readonly matchesService: MatchesService,
     private readonly attendanceService: AttendanceService,
-    private readonly paymentsService: PaymentsService
+    private readonly paymentsService: PaymentsService,
+    private readonly restaurantExpensesService: RestaurantExpensesService
   ) {}
 
   async processIncomingMessage(message: IncomingMessage): Promise<void> {
+    const normalizedBody = message.body.trim().toLowerCase();
     const command = parseCommand(message.body);
 
     try {
@@ -45,11 +428,203 @@ export class WhatsAppService {
 
     const player = await this.playersService.findOrCreateByPhone(message.fromPhone, message.profileName ?? "Jugador");
 
+    const existingSession = this.setupSessions.get(player.phoneE164);
+    if (existingSession) {
+      if (normalizedBody === "cancelar") {
+        this.setupSessions.delete(player.phoneE164);
+        await this.kapsoClient.sendText(player.phoneE164, "Configuracion cancelada.");
+        return;
+      }
+
+      await this.handleSetupSession(player.phoneE164, existingSession, message.body);
+      return;
+    }
+
     if (command === "UNKNOWN") {
+      const inferredVenue = parseVenueFromText(message.body);
+      if (inferredVenue) {
+        const activeMatch = await this.matchesService.getActiveMatch();
+        if (activeMatch) {
+          await this.matchesService.updateMatchVenue(activeMatch.id, inferredVenue);
+          const state = await this.matchesService.getMatchState(activeMatch.id);
+          const confirmedPlayers = await this.attendanceService.listConfirmedPlayers(activeMatch.id);
+          const updatedMatch = await this.matchesService.getActiveMatch();
+
+          if (state && updatedMatch) {
+            const { date, time } = formatStartsAt(updatedMatch.startsAt);
+            const slotsList = buildSlotsList(updatedMatch.slots, confirmedPlayers.map((row) => row.name));
+
+            await this.kapsoClient.sendText(
+              player.phoneE164,
+              [
+                "Direccion actualizada.",
+                `- Fecha: ${date}`,
+                `- Hora citacion: ${time}`,
+                `- Direccion: ${updatedMatch.venue}`,
+                `- Cupos: ${state.confirmedCount}/${state.slots} confirmados`,
+                "",
+                "Lista de jugadores:",
+                slotsList
+              ].join("\n")
+            );
+            return;
+          }
+        }
+      }
+    }
+
+    if (command === "UNKNOWN" && looksLikeSetupIntent(message.body)) {
+      this.setupSessions.set(player.phoneE164, { step: "AWAITING_SLOTS" });
+      await this.handleSetupSession(player.phoneE164, { step: "AWAITING_SLOTS" }, message.body);
+      return;
+    }
+
+    if (command === "SETUP_MATCH") {
+      this.setupSessions.set(player.phoneE164, { step: "AWAITING_SLOTS" });
       await this.kapsoClient.sendText(
         player.phoneE164,
-        "Comando no reconocido. Usa: me sumo, me bajo, cuanto debo, ya pague, estado"
+        "Soy Scloda, tu agente para organizar la pichanga.\n\nVamos a configurarla:\n1) Cuantos jugadores (cupos) tendra? Ejemplo: 12\n(Escribe 'cancelar' para salir)."
       );
+      return;
+    }
+
+    if (command === "RESTAURANT_HELP") {
+      await this.kapsoClient.sendText(player.phoneE164, buildRestaurantHelp());
+      return;
+    }
+
+    if (command === "RESTAURANT_CREATE") {
+      const payload = extractRestaurantCreatePayload(message.body);
+      const event = await this.restaurantExpensesService.startEvent(player.id, payload);
+
+      await this.kapsoClient.sendText(
+        player.phoneE164,
+        [
+          "Salida creada.",
+          `- Titulo: ${event.title}`,
+          `- Propina: ${event.tipPercent}%`,
+          `- Servicio: $${formatCurrency(event.serviceCharge)}`,
+          "",
+          "Comandos:",
+          "- salida me sumo",
+          "- salida consumo 2 piscolas 12000 /yo",
+          "- salida consumo pizza 22000 /todos",
+          "- salida estado"
+        ].join("\n")
+      );
+      return;
+    }
+
+    if (command === "RESTAURANT_JOIN") {
+      const active = await this.restaurantExpensesService.joinActiveEvent(player.id);
+      if (!active) {
+        await this.kapsoClient.sendText(player.phoneE164, "No hay salida activa. Crea una con: salida crear");
+        return;
+      }
+
+      const participants = await this.restaurantExpensesService.listJoinedParticipants(active.id);
+      const participantsLine = participants.map((row) => `${row.index}. ${row.name}`).join(" | ");
+      await this.kapsoClient.sendText(
+        player.phoneE164,
+        `Quedaste en la salida '${active.title}'. Participantes (${participants.length}): ${participantsLine}`
+      );
+      return;
+    }
+
+    if (command === "RESTAURANT_LEAVE") {
+      const active = await this.restaurantExpensesService.leaveActiveEvent(player.id);
+      if (!active) {
+        await this.kapsoClient.sendText(player.phoneE164, "No hay salida activa ahora.");
+        return;
+      }
+
+      await this.kapsoClient.sendText(player.phoneE164, `Listo, te saqué de '${active.title}'.`);
+      return;
+    }
+
+    if (command === "RESTAURANT_ITEM") {
+      const active = await this.restaurantExpensesService.getActiveEvent();
+      if (!active) {
+        await this.kapsoClient.sendText(player.phoneE164, "No hay salida activa. Crea una con: salida crear");
+        return;
+      }
+
+      const parsed = parseRestaurantConsumption(message.body);
+      if (!parsed) {
+        await this.kapsoClient.sendText(
+          player.phoneE164,
+          "Formato no valido. Ejemplo: salida consumo 2 piscolas 12000 /yo"
+        );
+        return;
+      }
+
+      try {
+        await this.restaurantExpensesService.addConsumption(active.id, player.id, parsed);
+      } catch (error) {
+        if (error instanceof Error && error.message === "no_valid_consumers") {
+          await this.kapsoClient.sendText(player.phoneE164, "No pude mapear esos participantes. Usa indices como #1,#3");
+          return;
+        }
+
+        if (error instanceof Error && error.message === "no_joined_participants") {
+          await this.kapsoClient.sendText(player.phoneE164, "Aun no hay participantes activos en la salida.");
+          return;
+        }
+
+        throw error;
+      }
+
+      const summary = await this.restaurantExpensesService.getSummary(active.id);
+      if (!summary) {
+        await this.kapsoClient.sendText(player.phoneE164, "Consumo registrado, pero no pude calcular el resumen.");
+        return;
+      }
+
+      await this.kapsoClient.sendText(player.phoneE164, buildRestaurantSummaryMessage(summary));
+      return;
+    }
+
+    if (command === "RESTAURANT_STATUS") {
+      const active = await this.restaurantExpensesService.getActiveEvent();
+      if (!active) {
+        await this.kapsoClient.sendText(player.phoneE164, "No hay salida activa. Usa: salida crear");
+        return;
+      }
+
+      const summary = await this.restaurantExpensesService.getSummary(active.id);
+      if (!summary) {
+        await this.kapsoClient.sendText(player.phoneE164, "No pude obtener el resumen de salida.");
+        return;
+      }
+
+      await this.kapsoClient.sendText(player.phoneE164, buildRestaurantSummaryMessage(summary));
+      return;
+    }
+
+    if (command === "RESTAURANT_CLOSE") {
+      const closed = await this.restaurantExpensesService.closeActiveEvent();
+      if (!closed) {
+        await this.kapsoClient.sendText(player.phoneE164, "No hay salida activa para cerrar.");
+        return;
+      }
+
+      const summary = await this.restaurantExpensesService.getSummary(closed.id);
+      if (!summary) {
+        await this.kapsoClient.sendText(player.phoneE164, `Salida '${closed.title}' cerrada.`);
+        return;
+      }
+
+      await this.kapsoClient.sendText(player.phoneE164, buildRestaurantSummaryMessage(summary, true));
+      return;
+    }
+
+    if (isGreetingOrHelp(normalizedBody)) {
+      await this.kapsoClient.sendText(player.phoneE164, buildSclodaIntro());
+      return;
+    }
+
+    if (command === "UNKNOWN") {
+      await this.kapsoClient.sendText(player.phoneE164, `${buildSclodaIntro()}\n\nNo entendi ese mensaje.`);
       return;
     }
 
@@ -65,10 +640,7 @@ export class WhatsAppService {
       await this.paymentsService.recalculateForMatch(activeMatch.id, activeMatch.totalCost);
       const debt = await this.paymentsService.getDebt(activeMatch.id, player.id);
 
-      await this.kapsoClient.sendText(
-        player.phoneE164,
-        `Listo, quedaste confirmado. Tu deuda actual es $${debt?.amountDue ?? 0}.`
-      );
+      await this.kapsoClient.sendText(player.phoneE164, `Listo, quedaste confirmado. Tu deuda actual es $${debt?.amountDue ?? 0}.`);
       return;
     }
 
@@ -111,10 +683,147 @@ export class WhatsAppService {
         return;
       }
 
+      const confirmedPlayers = await this.attendanceService.listConfirmedPlayers(activeMatch.id);
+      const { date, time } = formatStartsAt(activeMatch.startsAt);
+      const slotsList = buildSlotsList(activeMatch.slots, confirmedPlayers.map((row) => row.name));
+
       await this.kapsoClient.sendText(
         player.phoneE164,
-        `Estado pichanga: ${state.confirmedCount}/${state.slots} confirmados, ${state.openSpots} cupos libres, $${state.collected} recaudado, $${state.pending} pendiente.`
+        [
+          "Resumen Scloda",
+          `- Fecha: ${date}`,
+          `- Hora citacion: ${time}`,
+          `- Direccion: ${activeMatch.venue}`,
+          `- Cupos: ${state.confirmedCount}/${state.slots} confirmados`,
+          `- Caja: $${formatCurrency(state.collected)} recaudado | $${formatCurrency(state.pending)} pendiente`,
+          "",
+          "Lista de jugadores:",
+          slotsList
+        ].join("\n")
       );
+      return;
     }
+  }
+
+  private async handleSetupSession(phoneE164: string, session: MatchSetupSession, messageBody: string): Promise<void> {
+    const inferredSlots = parseSlotsFromText(messageBody);
+    const inferredCost = parseCostFromText(messageBody);
+    const inferredTime = parseCitationTime(messageBody);
+    const inferredVenue = parseVenueFromText(messageBody);
+
+    const merged: MatchSetupSession = {
+      step: session.step,
+      slots: session.slots ?? inferredSlots ?? undefined,
+      totalCost: session.totalCost ?? inferredCost ?? undefined,
+      citationHour: session.citationHour ?? inferredTime?.hour ?? undefined,
+      citationMinute: session.citationMinute ?? inferredTime?.minute ?? undefined,
+      venue: session.venue ?? inferredVenue ?? undefined
+    };
+
+    if (
+      merged.slots &&
+      merged.totalCost &&
+      merged.citationHour !== undefined &&
+      merged.citationMinute !== undefined &&
+      merged.venue
+    ) {
+      await this.completeMatchSetup(
+        phoneE164,
+        merged.slots,
+        merged.totalCost,
+        merged.citationHour,
+        merged.citationMinute,
+        merged.venue
+      );
+      return;
+    }
+
+    if (!merged.slots) {
+      this.setupSessions.set(phoneE164, { step: "AWAITING_SLOTS" });
+      await this.kapsoClient.sendText(
+        phoneE164,
+        "No capte la cantidad de jugadores. Dime algo como: '12 jugadores' o solo '12'."
+      );
+      return;
+    }
+
+    if (!merged.totalCost) {
+      this.setupSessions.set(phoneE164, {
+        step: "AWAITING_TOTAL_COST",
+        slots: merged.slots
+      });
+      await this.kapsoClient.sendText(
+        phoneE164,
+        "Perfecto. Ahora el valor de cancha. Ejemplos: '80000', '$80.000' o '80 lucas'."
+      );
+      return;
+    }
+
+    if (merged.citationHour === undefined || merged.citationMinute === undefined) {
+      this.setupSessions.set(phoneE164, {
+        step: "AWAITING_CITATION_TIME",
+        slots: merged.slots,
+        totalCost: merged.totalCost
+      });
+      await this.kapsoClient.sendText(
+        phoneE164,
+        "Listo. Solo falta la hora de citacion. Ejemplos: '21:00', '21', '9pm' o 'a las 21:30'."
+      );
+      return;
+    }
+
+    this.setupSessions.set(phoneE164, {
+      step: "AWAITING_VENUE",
+      slots: merged.slots,
+      totalCost: merged.totalCost,
+      citationHour: merged.citationHour,
+      citationMinute: merged.citationMinute
+    });
+
+    await this.kapsoClient.sendText(
+      phoneE164,
+      "Perfecto. Falta la direccion/cancha. Ejemplos: 'Escandinavia 350' o 'Cancha Las Condes'."
+    );
+  }
+
+  private async completeMatchSetup(
+    phoneE164: string,
+    slots: number,
+    totalCost: number,
+    hour: number,
+    minute: number,
+    venue: string
+  ): Promise<void> {
+    const startsAt = buildNextStartsAt(hour, minute);
+    const createdMatch = await this.matchesService.createMatch({
+      startsAt,
+      venue,
+      totalCost,
+      slots,
+      activateNow: true
+    });
+
+    await this.paymentsService.recalculateForMatch(createdMatch.id, createdMatch.totalCost);
+    this.setupSessions.delete(phoneE164);
+
+    const { date, time } = formatStartsAt(startsAt);
+    const slotsList = buildSlotsList(slots, []);
+
+    await this.kapsoClient.sendText(
+      phoneE164,
+      [
+        "Listo, partido configurado.",
+        `- Fecha: ${date}`,
+        `- Hora citacion: ${time}`,
+        `- Direccion: ${venue}`,
+        `- Valor cancha: $${formatCurrency(totalCost)}`,
+        `- Cupos: ${slots}`,
+        "",
+        "Lista de jugadores:",
+        slotsList,
+        "",
+        "Para confirmar, respondan: me sumo"
+      ].join("\n")
+    );
   }
 }

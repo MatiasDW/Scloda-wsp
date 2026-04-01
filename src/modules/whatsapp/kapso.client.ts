@@ -1,6 +1,12 @@
 import { env } from "../../config/env.js";
 import { logger } from "../../shared/logger.js";
 
+function normalizeRecipient(toPhone: string): string {
+  // Kapso/Meta expects WA ID style digits (e.g. 56912345678) for individual recipients.
+  const digitsOnly = toPhone.replace(/[^\d]/g, "");
+  return digitsOnly.length > 0 ? digitsOnly : toPhone;
+}
+
 export class KapsoClient {
   async sendText(toPhoneE164: string, message: string): Promise<void> {
     if (env.WHATSAPP_MOCK_MODE) {
@@ -19,7 +25,9 @@ export class KapsoClient {
         "X-API-Key": env.KAPSO_API_KEY
       },
       body: JSON.stringify({
-        to: toPhoneE164,
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: normalizeRecipient(toPhoneE164),
         type: "text",
         text: { body: message }
       })

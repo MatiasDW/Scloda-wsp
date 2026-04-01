@@ -1,4 +1,4 @@
-import { PaymentStatus } from "@prisma/client";
+import { PaymentStatus } from "../../generated/prisma/index.js";
 import { prisma } from "../../shared/db/prisma.js";
 import { AttendanceService } from "../attendance/attendance.service.js";
 

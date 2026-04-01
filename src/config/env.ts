@@ -3,6 +3,24 @@ import { z } from "zod";
 
 config();
 
+const booleanFromEnv = z.preprocess((value) => {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["false", "0", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return value;
+}, z.boolean());
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
@@ -10,7 +28,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   ADMIN_API_KEY: z.string().min(4).default("dev-admin-key"),
-  WHATSAPP_MOCK_MODE: z.coerce.boolean().default(true),
+  WHATSAPP_MOCK_MODE: booleanFromEnv.default(true),
   WEBHOOK_SECRET: z.string().min(4).default("change-me"),
   KAPSO_API_KEY: z.string().optional(),
   KAPSO_SEND_MESSAGE_URL: z.string().url().optional()

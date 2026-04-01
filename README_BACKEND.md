@@ -29,6 +29,24 @@ Servicios:
 - `POST /admin/matches` (header `x-admin-key`)
 - `GET /admin/matches/:id/state` (header `x-admin-key`)
 - `POST /admin/matches/:id/remind` (header `x-admin-key`)
+- `POST /tools/restaurant/split`
+
+## 4) Comandos WhatsApp
+Pichanga:
+- `configurar partido` (flujo guiado: cupos -> valor cancha -> citacion -> direccion)
+- `me sumo`
+- `me bajo`
+- `cuanto debo`
+- `ya pague`
+- `estado`
+
+Salida / restaurant:
+- `salida crear [nombre opcional]`
+- `salida me sumo`
+- `salida me bajo`
+- `salida consumo <detalle> <monto> [/yo|/todos|#1,#2]`
+- `salida estado`
+- `salida cerrar`
 
 Ejemplo crear partido:
 ```bash
@@ -60,7 +78,25 @@ curl -X POST http://localhost:3000/webhooks/kapso/messages \\
   }'
 ```
 
-## 4) Nota Kapso
+Ejemplo dividir cuenta restaurant:
+```bash
+curl -X POST http://localhost:3000/tools/restaurant/split \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "subtotal": 48500,
+    "people": 4,
+    "tipPercent": 10,
+    "serviceCharge": 1500
+  }'
+```
+
+Ejemplos salida por WhatsApp:
+- `salida crear Cena post pichanga`
+- `salida consumo 2 piscolas 12000 /yo`
+- `salida consumo pizza grande 22000 /todos`
+- `salida consumo papas rusticas 15000 #1,#3`
+
+## 5) Nota Kapso
 Para desarrollo local, `WHATSAPP_MOCK_MODE=true` y las respuestas se registran en logs.
 Para produccion, setear:
 - `WHATSAPP_MOCK_MODE=false`

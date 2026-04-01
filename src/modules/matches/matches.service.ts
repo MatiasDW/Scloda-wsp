@@ -1,4 +1,4 @@
-import { MatchStatus } from "@prisma/client";
+import { MatchStatus } from "../../generated/prisma/index.js";
 import { prisma } from "../../shared/db/prisma.js";
 
 export interface CreateMatchInput {
@@ -33,6 +33,13 @@ export class MatchesService {
         slots: input.slots,
         status: input.activateNow ? MatchStatus.ACTIVE : MatchStatus.DRAFT
       }
+    });
+  }
+
+  async updateMatchVenue(matchId: string, venue: string) {
+    return prisma.match.update({
+      where: { id: matchId },
+      data: { venue }
     });
   }
 

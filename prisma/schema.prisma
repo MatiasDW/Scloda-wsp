@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
 }
 
 datasource db {
@@ -24,15 +25,36 @@ enum PaymentStatus {
   PAID
 }
 
+enum RestaurantEventStatus {
+  ACTIVE
+  CLOSED
+  CANCELED
+}
+
+enum RestaurantParticipantStatus {
+  JOINED
+  LEFT
+}
+
+enum RestaurantItemScope {
+  SELF
+  ALL
+  SELECTED
+}
+
 model Player {
-  id          String       @id @default(cuid())
-  name        String
-  phoneE164   String       @unique
-  isActive    Boolean      @default(true)
-  createdAt   DateTime     @default(now())
-  updatedAt   DateTime     @updatedAt
-  attendance  Attendance[]
-  payments    Payment[]
+  id                      String                @id @default(cuid())
+  name                    String
+  phoneE164               String                @unique
+  isActive                Boolean               @default(true)
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  attendance              Attendance[]
+  payments                Payment[]
+  restaurantEventsOwned   RestaurantEvent[]     @relation("RestaurantEventOwner")
+  restaurantParticipants  RestaurantParticipant[]
+  restaurantItemsCreated  RestaurantItem[]      @relation("RestaurantItemCreator")
+  restaurantItemConsumers RestaurantItemConsumer[]
 }
 
 model Match {
@@ -87,4 +109,66 @@ model InboundMessage {
   createdAt  DateTime @default(now())
 
   @@index([phone])
+}
+
+model RestaurantEvent {
+  id                String              @id @default(cuid())
+  title             String
+  venue             String?
+  startsAt          DateTime?
+  tipPercent        Int                 @default(10)
+  serviceCharge     Int                 @default(0)
+  status            RestaurantEventStatus @default(ACTIVE)
+  createdByPlayerId String
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  createdBy         Player              @relation("RestaurantEventOwner", fields: [createdByPlayerId], references: [id], onDelete: Cascade)
+  participants      RestaurantParticipant[]
+  items             RestaurantItem[]
+
+  @@index([status])
+  @@index([createdByPlayerId, status])
+}
+
+model RestaurantParticipant {
+  id        String                    @id @default(cuid())
+  eventId   String
+  playerId  String
+  status    RestaurantParticipantStatus @default(JOINED)
+  createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @updatedAt
+  event     RestaurantEvent           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  player    Player                    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, playerId])
+  @@index([eventId, status])
+}
+
+model RestaurantItem {
+  id                String             @id @default(cuid())
+  eventId           String
+  createdByPlayerId String
+  description       String
+  quantity          Int                @default(1)
+  totalAmount       Int
+  scope             RestaurantItemScope @default(SELF)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  event             RestaurantEvent    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  createdBy         Player             @relation("RestaurantItemCreator", fields: [createdByPlayerId], references: [id], onDelete: Cascade)
+  consumers         RestaurantItemConsumer[]
+
+  @@index([eventId, createdAt])
+}
+
+model RestaurantItemConsumer {
+  id        String         @id @default(cuid())
+  itemId    String
+  playerId  String
+  createdAt DateTime       @default(now())
+  item      RestaurantItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  player    Player         @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([itemId, playerId])
+  @@index([playerId])
 }
